@@ -319,6 +319,21 @@ class Watson(object):
         return sorted(set(self.frames['project']))
 
     @property
+    def last_projects(self):
+        """
+        Return the list of all the existing projects, sorted by update time
+        """
+        projects = [f.project for f in sorted(self.frames, reverse=True)]
+        seen = set()
+        ret = []
+        for p in projects:
+            if p not in seen:
+                ret.append(p)
+                seen.add(p)
+
+        return ret
+
+    @property
     def tags(self):
         """
         Return the list of the tags, sorted by name.

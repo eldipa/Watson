@@ -33,9 +33,9 @@ def get_projects(ctx, param, incomplete):
     # breakpoint()
     return [
         project
-        for project in watson.projects
+        for project in watson.last_projects
         if project.startswith(incomplete) and project not in ctx.params.get("args", [])
-    ]
+        ][:12]
 
 
 def get_frames(ctx, param, incomplete):
