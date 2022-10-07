@@ -19,7 +19,7 @@ def get_project_tag_combined(ctx, param, incomplete):
         given_tags = set(ctx.params["args"][1:])
         return [
             tag
-            for tag in [f"+{t}" for t in watson.tags]
+            for tag in [f"+{t}" for t in watson.tags_of_project(ctx.params["args"][0])]
             if tag.startswith(incomplete) and tag not in given_tags
         ]
 

@@ -340,6 +340,14 @@ class Watson(object):
         """
         return sorted(set(tag for tags in self.frames['tags'] for tag in tags))
 
+    def tags_of_project(self, project):
+        """
+        Return the list of the tags, sorted by name.
+        """
+        frames = list(self.frames.filter(projects=[project]))
+        tags = sum([f.tags for f in frames], [])
+        return sorted(set(tags))
+
     def _get_request_info(self, route):
         config = self.config
 
