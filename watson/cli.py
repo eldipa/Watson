@@ -873,7 +873,7 @@ def aggregate(ctx, watson, current, from_, to, projects, tags, output_format,
     delta = (to - from_).days
     lines = []
 
-    for i in range(delta + 1):
+    for i in reversed(range(delta + 1)):
         offset = datetime.timedelta(days=i)
         from_offset = from_ + offset
         output = ctx.invoke(report, current=current, from_=from_offset,
