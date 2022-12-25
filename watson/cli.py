@@ -726,12 +726,14 @@ def report(watson, current, from_, to, projects, tags, ignore_projects,
     projects = report['projects']
 
     for project in projects:
-        _print('{tab}{project} - {time}'.format(
+        _print('{tab}{project} {time}'.format(
             tab=tab,
-            time=style('time', format_timedelta(
+            time=style('time', '{:>11}'.format(format_timedelta(
                 datetime.timedelta(seconds=project['time'])
-            )),
-            project=style('project', project['name'])
+            ))),
+            project=style('project', '{:<{}}'.format(
+                project['name'], 47
+                ))
         ))
 
         tags = project['tags']
@@ -740,11 +742,11 @@ def report(watson, current, from_, to, projects, tags, ignore_projects,
 
             for tag in tags:
                 _print('\t[{tag} {time}]'.format(
-                    time=style('time', '{:>11}'.format(format_timedelta(
+                    time=style('raw', '{:>11}'.format(format_timedelta(
                         datetime.timedelta(seconds=tag['time'])
                     ))),
                     tag=style('tag', '{:<{}}'.format(
-                        tag['name'], longest_tag
+                        tag['name'], 40 # ugly, used to be "longest_tag" but it works better
                     )),
                 ))
         _print("")
@@ -1121,8 +1123,14 @@ def log(watson, current, reverse, from_, to, projects, tags, ignore_projects,
             )
         )
 
+        gaps = [
+                format_timedelta(cur.start - prev.stop, drop_secs=True)
+                for cur, prev in zip(frames[1:], frames[:-1])
+                ]
+        gaps.insert(0, format_timedelta(0, drop_secs=True))
+
         _print("\n".join(
-            "\t{id}  {start} to {stop}  {delta:>11}  {project}{tags}".format(
+            "  {gap:>8}  {id}  {start} to {stop}  {delta:>11}  {project}{tags}".format(
                 delta=format_timedelta(frame.stop - frame.start),
                 project=style('project', '{:>{}}'.format(
                     frame.project, longest_project
@@ -1130,9 +1138,10 @@ def log(watson, current, reverse, from_, to, projects, tags, ignore_projects,
                 tags=(" "*2 if frame.tags else "") + style('tags', frame.tags),
                 start=style('time', '{:HH:mm}'.format(frame.start)),
                 stop=style('time', '{:HH:mm}'.format(frame.stop)),
-                id=style('short_id', frame.id)
+                id=style('short_id', frame.id),
+                gap=gap
             )
-            for frame in frames
+            for gap, frame in zip(gaps, frames)
         ))
 
     _final_print(lines)

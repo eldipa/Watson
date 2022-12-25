@@ -68,7 +68,8 @@ def style(name, element):
         'error': {'fg': 'red'},
         'date': {'fg': 'cyan'},
         'short_id': _style_short_id,
-        'id': {'fg': 'white'}
+        'id': {'fg': 'white'},
+        'raw': None
     }
 
     fmt = formats.get(name, {})
@@ -76,15 +77,18 @@ def style(name, element):
     if isinstance(fmt, dict):
         return click.style(element, **fmt)
     else:
+        if fmt is None:
+            return element
+
         # The fmt might be a function if we need to do some computation
         return fmt(element)
 
 
-def format_timedelta(delta):
+def format_timedelta(delta, drop_secs=False):
     """
     Return a string roughly representing a timedelta.
     """
-    seconds = int(delta.total_seconds())
+    seconds = delta if isinstance(delta, int) else int(delta.total_seconds())
     neg = seconds < 0
     seconds = abs(seconds)
     total = seconds
@@ -100,7 +104,8 @@ def format_timedelta(delta):
         stems.append('{:02}m'.format(mins))
         seconds -= mins * 60
 
-    stems.append('{:02}s'.format(seconds))
+    if not drop_secs:
+        stems.append('{:02}s'.format(seconds))
 
     return ('-' if neg else '') + ' '.join(stems)
 
