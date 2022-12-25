@@ -1268,10 +1268,12 @@ def add(watson, args, from_, to, confirm_new_project, confirm_new_tag):
               help="Confirm addition of new project.")
 @click.option('-b', '--confirm-new-tag', is_flag=True, default=False,
               help="Confirm creation of new tag.")
+@click.option('--back', 'back', type=int, default=5,
+              help=('Edit the last n frames'))
 @click.argument('id', required=False, shell_complete=get_frames)
 @click.pass_obj
 @catch_watson_error
-def edit(watson, confirm_new_project, confirm_new_tag, id):
+def edit(watson, confirm_new_project, confirm_new_tag, back, id):
     """
     Edit a frame.
 
@@ -1292,27 +1294,30 @@ def edit(watson, confirm_new_project, confirm_new_tag, id):
     local_tz = local_tz_info()
 
     if id:
-        frame = get_frame_from_argument(watson, id)
-        id = frame.id
+        frames = [get_frame_from_argument(watson, id)]
     elif watson.is_started:
-        frame = Frame(watson.current['start'], None, watson.current['project'],
+        current_incomplete_frame = Frame(watson.current['start'], None, watson.current['project'],
                       None, watson.current['tags'])
+        frames = watson.frames._rows[-back:] + [current_incomplete_frame]
     elif watson.frames:
-        frame = watson.frames[-1]
-        id = frame.id
+        frames = watson.frames._rows[-back:]
     else:
         raise click.ClickException(
             style('error', "No frames recorded yet. It's time to create your "
                            "first one!"))
 
-    data = {
+    frames = frames[::-1] # latest on top
+
+    data = [{
+        'id': frame.id or '',
         'start': frame.start.format(datetime_format),
+        'stop':  frame.stop.format(datetime_format) if frame.id else '',
         'project': frame.project,
         'tags': frame.tags,
-    }
+    } for frame in frames]
 
-    if id:
-        data['stop'] = frame.stop.format(datetime_format)
+    # keep a list of the ids to be edited.
+    initial_ids = {frame.id or '' for frame in frames}
 
     text = json.dumps(data, indent=4, sort_keys=True, ensure_ascii=False)
 
@@ -1329,30 +1334,34 @@ def edit(watson, confirm_new_project, confirm_new_tag, id):
             return
 
         try:
-            data = json.loads(output)
-            project = data['project']
-            # Confirm creation of new project if that option is set
-            if (watson.config.getboolean('options', 'confirm_new_project') or
-                    confirm_new_project):
-                confirm_project(project, watson.projects)
-            tags = data['tags']
-            # Confirm creation of new tag(s) if that option is set
-            if (watson.config.getboolean('options', 'confirm_new_tag') or
-                    confirm_new_tag):
-                confirm_tags(tags, watson.tags)
-            start = arrow.get(data['start'], datetime_format).replace(
-                tzinfo=local_tz).to('utc')
-            stop = arrow.get(data['stop'], datetime_format).replace(
-                tzinfo=local_tz).to('utc') if id else None
-            # if start time of the project is not before end time
-            #  raise ValueException
-            if not watson.is_started and start > stop:
-                raise ValueError(
-                    "Task cannot end before it starts.")
-            if start > arrow.utcnow():
-                raise ValueError("Start time cannot be in the future")
-            if stop and stop > arrow.utcnow():
-                raise ValueError("Stop time cannot be in the future")
+            edited_frames = json.loads(output)
+            for num, frame_d in enumerate(edited_frames):
+                project = frame_d['project']
+                errmsg = f"Frame {frame_d['id']} ({num}) - {project}"
+
+                # Confirm creation of new project if that option is set
+                if (watson.config.getboolean('options', 'confirm_new_project') or
+                        confirm_new_project):
+                    confirm_project(project, watson.projects)
+                tags = frame_d['tags']
+                # Confirm creation of new tag(s) if that option is set
+                if (watson.config.getboolean('options', 'confirm_new_tag') or
+                        confirm_new_tag):
+                    confirm_tags(tags, watson.tags)
+                start = arrow.get(frame_d['start'], datetime_format).replace(
+                    tzinfo=local_tz).to('utc')
+                stop = arrow.get(frame_d['stop'], datetime_format).replace(
+                    tzinfo=local_tz).to('utc') if frame_d['id'] else None
+                # if start time of the project is not before end time
+                #  raise ValueException
+                if not watson.is_started and start > stop:
+                    raise ValueError(
+                         f"{errmsg}: Task cannot end before it starts."
+                         )
+                if start > arrow.utcnow():
+                    raise ValueError(f"{errmsg}: Start time cannot be in the future")
+                if stop and stop > arrow.utcnow():
+                    raise ValueError(f"{errmsg}: Stop time cannot be in the future")
             # break out of while loop and continue execution of
             #  the edit function normally
             break
@@ -1372,28 +1381,77 @@ def edit(watson, confirm_new_project, confirm_new_tag, id):
         text = output
 
     # we reach this when we break out of the while loop above
-    if id:
-        watson.frames[id] = (project, start, stop, tags)
-    else:
-        watson.current = dict(start=start, project=project, tags=tags)
+    edited_ids = set()
+    for frame_d in edited_frames:
+        id, project = frame_d['id'], frame_d['project']
+        tags = frame_d['tags']
+
+        start = arrow.get(frame_d['start'], datetime_format).replace(
+            tzinfo=local_tz).to('utc')
+        stop = arrow.get(frame_d['stop'], datetime_format).replace(
+            tzinfo=local_tz).to('utc') if frame_d['id'] else None
+        if id:
+            watson.frames[id] = (project, start, stop, tags)
+            edited_ids.add(id)
+        else:
+            watson.current = dict(start=start, project=project, tags=tags)
+
+    deleted_ids = initial_ids - edited_ids
+    for id in deleted_ids:
+        if not id:
+            # current frame cannot be deleted
+            continue
+
+        frame = watson.frames[id]
+        project = frame.project
+        tags = frame.tags
+
+        start = frame.start
+        stop = frame.stop
+        click.echo(
+                "Deleting frame for project {project}{tags}, from {start} to {stop} ({delta})".format(
+                    delta=format_timedelta(stop - start) if stop else '-',
+                    project=style('project', project),
+                    tags=(" " if tags else "") + style('tags', tags),
+                    start=style(
+                        'time',
+                        start.to(local_tz).format(time_format)
+                    ),
+                    stop=style(
+                        'time',
+                        stop.to(local_tz).format(time_format) if stop else '-'
+                    )
+                    )
+                )
+
+        del watson.frames[id]
 
     watson.save()
-    click.echo(
-        "Edited frame for project {project}{tags}, from {start} to {stop} "
-        "({delta})".format(
-            delta=format_timedelta(stop - start) if stop else '-',
-            project=style('project', project),
-            tags=(" " if tags else "") + style('tags', tags),
-            start=style(
-                'time',
-                start.to(local_tz).format(time_format)
-            ),
-            stop=style(
-                'time',
-                stop.to(local_tz).format(time_format) if stop else '-'
+
+    for frame_d in edited_frames[::-1]: # latest to bottom
+        id, project = frame_d['id'], frame_d['project']
+        tags = frame_d['tags']
+
+        start = arrow.get(frame_d['start'], datetime_format).replace(
+            tzinfo=local_tz).to('utc')
+        stop = arrow.get(frame_d['stop'], datetime_format).replace(
+            tzinfo=local_tz).to('utc') if frame_d['id'] else None
+        click.echo(
+            "Edited frame for project {project}{tags}, from {start} to {stop} "
+            "({delta})".format(
+                delta=format_timedelta(stop - start) if stop else '-',
+                project=style('project', project),
+                tags=(" " if tags else "") + style('tags', tags),
+                start=style(
+                    'time',
+                    start.to(local_tz).format(time_format)
+                ),
+                stop=style(
+                    'time',
+                    stop.to(local_tz).format(time_format) if stop else '-'
+                )
             )
         )
-    )
 
 
 @cli.command(context_settings={'ignore_unknown_options': True})
