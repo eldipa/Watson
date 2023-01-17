@@ -278,7 +278,13 @@ class Watson(object):
         self.current = new_frame
         return self.current
 
-    def stop(self, stop_at=None):
+    def get_current_frame_if_any(self):
+        if not self.is_started:
+            return None
+
+        return self.current
+
+    def stop(self, stop_at=None, tags=None):
         if not self.is_started:
             raise WatsonError("No project started.")
 
@@ -291,13 +297,17 @@ class Watson(object):
             # stop function and calling it, the value of `stop_at` could be
             # outdated if defined using a default argument.
             stop_at = arrow.now()
+
         if old['start'] > stop_at:
             raise WatsonError('Task cannot end before it starts.')
         if stop_at > arrow.now():
             raise WatsonError('Task cannot end in the future.')
 
+        tags = (tags or [])
+        tags.extend(old['tags'])
+
         frame = self.frames.add(
-            old['project'], old['start'], stop_at, tags=old['tags']
+            old['project'], old['start'], stop_at, tags=deduplicate(tags)
         )
         self.current = None
 
@@ -307,9 +317,13 @@ class Watson(object):
         if not self.is_started:
             raise WatsonError("No project started.")
 
-        old_current = self.current
+        old = self.current
         self.current = None
-        return old_current
+
+        frame = self.frames.new_frame(
+            old['project'], old['start'], arrow.now(), tags=deduplicate(old['tags'])
+        )
+        return frame
 
     @property
     def projects(self):

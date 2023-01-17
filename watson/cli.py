@@ -110,11 +110,19 @@ class DateTimeParamType(click.ParamType):
 
     def _parse_multiformat(self, value) -> arrow:
         date = None
-        for fmt in (None, 'HH:mm:ss', 'HH:mm'):
+
+        for fmt in (None, 'HH:mm:ss', 'HH:mm', int):
             try:
                 if fmt is None:
                     date = arrow.get(value)
+                elif fmt == int:
+                    minutes = int(value)
+                    date = arrow.now().dehumanize(f"{minutes} minutes ago")
                 else:
+                    # from 8:00 to 08:00
+                    if len(value.split(":")[0]) == 1:
+                        value = "0" + value
+
                     date = arrow.get(value, fmt)
                     date = arrow.now().replace(
                         hour=date.hour,
@@ -280,13 +288,28 @@ def start(ctx, watson, confirm_new_project, confirm_new_tag, args, at_,
     _start(watson, project, tags, start_at=at_, gap=gap_)
 
 
+def open_suspend_resume_log_file(watson):
+    fname = os.devnull
+    if watson.config.has_option('options', 'suspend_resume_logfile'):
+        fname = watson.config.get('options', 'suspend_resume_logfile')
+
+    try:
+        return open(fname, 'rt')
+    except:
+        return open(os.devnull, 'rt')
+
 @cli.command(context_settings={'ignore_unknown_options': True})
 @click.option('--at', 'at_', type=DateTime, default=None,
               help=('Stop frame at this time. Must be in '
                     '(YYYY-MM-DDT)?HH:MM(:SS)? format.'))
+@click.option('--cancel', 'cancel_', type=bool, default=False,
+              help=('The last frame is cancelled instead of stopped.'))
+@click.argument('args', nargs=-1,
+                shell_complete=get_project_tag_combined)
 @click.pass_obj
+@click.pass_context
 @catch_watson_error
-def stop(watson, at_):
+def stop(ctx, watson, at_, cancel_, args):
     """
     Stop monitoring time for the current project.
 
@@ -300,16 +323,105 @@ def stop(watson, at_):
     $ watson stop --at 13:37
     Stopping project apollo11, started an hour ago and stopped 30 minutes ago. (id: e9ccd52) # noqa: E501
     """
-    frame = watson.stop(stop_at=at_)
-    output_str = "Stopping project {}{}, started {} and stopped {}. (id: {})"
-    click.echo(output_str.format(
-        style('project', frame.project),
-        (" " if frame.tags else "") + style('tags', frame.tags),
-        style('time', frame.start.humanize()),
-        style('time', frame.stop.humanize()),
-        style('short_id', frame.id),
-    ))
-    watson.save()
+
+    last_stop_at = at_
+    del at_
+
+    if last_stop_at is None:
+        last_stop_at = arrow.now()
+
+    # Parse all the tags
+    tags = parse_tags(args)
+    del args
+
+    stop_start_at = []
+    expecting = "suspend"
+
+    # See if during the current active frame we suspended/resumed the
+    # machine in which case we want to track that and "chop" the current
+    # frame into smaller ones to represent better how much we worked on
+    current = watson.get_current_frame_if_any()
+    if current is not None:
+        with open_suspend_resume_log_file(watson) as f:
+            for line in f:
+                what, when = line.strip().split()
+                when = arrow.get(when)
+
+                # We may expecting a "suspend" event or a "resume" event
+                # This is to make the events in the file consistent with
+                # the expected symmetry of stop-start-stop-start-...
+                if what != expecting:
+                    continue
+
+                # Any "suspend" event represent an implicit "watson stop"
+                # because it makes sense that if the host machine is suspended,
+                # nobody is working at that time.
+                if what == "suspend":
+                    if when >= current['start'] and when < last_stop_at:
+                        stop_start_at.append(when)
+                        expecting = "resume"
+
+                # Like before, the "resume" event means that we will start
+                # working on that project again as with "watson start"
+                # If not true, the user can remove it later with "watson edit"
+                elif what == "resume":
+                    if when >= current['start'] and when < last_stop_at:
+                        stop_start_at.append(when)
+                        expecting = "suspend"
+
+    # The next (expecting) event should be "suspend" meaning that
+    # from the perspective of the logs the machine is not-suspended
+    # and running.
+    # And this makes sense as the user is calling "watson" because
+    # the machine is on.
+    #
+    # If the expecting event is "resume" it means that the user explicitly
+    # asked to "stop" at some time between a suspend and resume.
+    #
+    # In this case we will not honor the user given stop_at
+    if expecting == "suspend":
+        stop_start_at.append(last_stop_at)
+
+    # Therefore, we should have an odd number of events collected:
+    #   stop
+    #   stop, start, stop
+    #   stop, start, stop, start, stop
+    #
+    # The last "stop" may be replaced by a "cancel" if cancel_ is True
+    assert len(stop_start_at) % 2 == 1
+
+
+    ix_cancel = len(stop_start_at)-1 if cancel_ else -1
+    for ix, when in enumerate(stop_start_at):
+        if ix % 2 == 0:
+            if not watson.is_started:
+                raise _watson.WatsonError("No project started.")
+
+            current = watson.current
+            elapsed = (when - current['start']).total_seconds()
+
+            # Cancel the last frame (see ix_cancel) or cancel an inner
+            # frame if it elapsed less than 45 secs.
+            # An inner frame is the one that not happen at the begin
+            # or end of the frame list
+            #
+            # Otherwise "stop" the frame
+            if ix == ix_cancel or (elapsed < 45 and 0 < ix < len(stop_start_at)-1):
+                frame = watson.cancel()
+                output_str = "Cancelling project {}{}, started {} and stopped {}. (id: {})"
+            else:
+                frame = watson.stop(stop_at=when, tags=tags)
+                output_str = "Stopping project {}{}, started {} and stopped {}. (id: {})"
+            click.echo(output_str.format(
+                style('project', frame.project),
+                (" " if frame.tags else "") + style('tags', frame.tags),
+                style('time', frame.start.humanize()),
+                style('time', frame.stop.humanize()),
+                style('short_id', frame.id),
+            ))
+            watson.save()
+        else:
+            ctx.invoke(restart, at_=when)
 
 
 @cli.command(context_settings={'ignore_unknown_options': True})
@@ -394,18 +506,14 @@ def restart(ctx, watson, id, stop_, at_, gap_=True):
 
 @cli.command()
 @click.pass_obj
+@click.pass_context
 @catch_watson_error
-def cancel(watson):
+def cancel(ctx, watson):
     """
     Cancel the last call to the start command. The time will
     not be recorded.
     """
-    old = watson.cancel()
-    click.echo("Canceling the timer for project {}{}".format(
-        style('project', old['project']),
-        (" " if old['tags'] else "") + style('tags', old['tags'])
-    ))
-    watson.save()
+    ctx.invoke(stop, cancel_=True)
 
 
 @cli.command()
@@ -1237,11 +1345,28 @@ def add(watson, args, from_, to, confirm_new_project, confirm_new_tag):
     \b
     $ watson add --from "2018-03-20 12:00:00" --to "2018-03-20 13:00:00" \\
      programming +addfeature
+
+    $ watson add --from "10:10" --to "15:20"  -2
     """
-    # parse project name from args
-    project = ' '.join(
-        itertools.takewhile(lambda s: not s.startswith('+'), args)
-    )
+
+    project = None
+    tags = []
+    if args and args[0].startswith("-"):
+        try:
+            n = int(args[0])
+        except ValueError:
+            pass
+        else:
+            frame = get_frame_from_argument(watson, n)
+            project = frame.project
+            tags = frame.tags
+
+    if not project:
+        # parse project name from args
+        project = ' '.join(
+            itertools.takewhile(lambda s: not s.startswith('+'), args)
+        )
+
     if not project:
         raise click.ClickException("No project given.")
 
@@ -1251,7 +1376,7 @@ def add(watson, args, from_, to, confirm_new_project, confirm_new_tag):
         confirm_project(project, watson.projects)
 
     # Parse all the tags
-    tags = parse_tags(args)
+    tags += [t for t in parse_tags(args) if t not in tags]
 
     # Confirm creation of new tag(s) if that option is set
     if (watson.config.getboolean('options', 'confirm_new_tag') or
